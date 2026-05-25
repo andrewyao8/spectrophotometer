@@ -1,0 +1,1 @@
+Perry the Platypus-themed spectrophotometer designed to detect diseased biomarker concentrations in blood samples. Achieved 100% accuracy and precision in validation studies. Tolerance is +/- 0.191% concentration for a 95% confidence interval.
