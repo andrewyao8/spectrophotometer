@@ -1,0 +1,306 @@
+// importing libraries
+#include <LiquidCrystal_I2C.h>
+
+// initializing LCD with I2C backpack
+LiquidCrystal_I2C lcd(0x27, 16, 2);
+
+
+// constant variables 
+
+// digital pins for buttons
+const int redButtonPin = 2; // red button
+const int yellowButtonPin = 4; // yellow button
+const int blueButtonPin = 7; // blue button
+
+// photoresistor analog reading
+const int photoRead = A0;
+
+// stores digital reading of each button
+int redButtonReading = 0;
+int yellowButtonReading = 0;
+int blueButtonReading = 0;
+
+// collects absorbance readings 30 times per sample
+const int numPoints = 30;
+// creates array to hold numPoints number of samples to calculate average absorbance
+float samples[numPoints];
+
+// variables to calculate resistance of photoresistor for blank cuvette and unknown samples
+// output voltage
+float vOut = 0.0; 
+// input voltage
+const float vIn = 5.209; // can be variable
+// photoresistor resistance
+float photoResistance = 0.0;
+// analog reading of Vout for blank cuvette (0% biomarker concentration)
+const float analogBlank = 489.0;
+// resistance of resistor 1 (1000 ohm resistor)
+const float r1 = 959.0;
+
+// calculating resistance of the blank cuvette
+float Voutblank = (analogBlank/1023.0)*vIn;
+float rBlank= r1 * (Voutblank/(vIn-Voutblank));
+
+float absorb = 0.0; // variable that holds calculated absorbance values before storing in samples array
+
+// flags that track which buttons were most recently pressed
+// to enforce required blue --> yellow --> red order
+int yellowState = 0; // 1 = measurement has been taken since last reset 
+int blueState = 0; // 1 = blue button pressed but yellow has not been pressed after it
+int redState = 0; // 1 = red was pressed without blue being pressed after it
+
+// confidence interval variables
+const int n = 7; // number of points used to create calibration curve
+const int m = numPoints; // number of absorbance readings collected per sample
+const float stdError = 0.022762; // standard error
+const float sampleStd = -0.26841; // Sstd
+const float slope = -0.1694; // b1
+const float intercept = -0.0144; // b0
+const float concStd = 1.080123; // sCstd
+const float t = 2.571; // t value that corresponds to 28 (30-2) degrees of freedom
+
+
+void setup() {
+  Serial.begin(9600); // initialize Serial monitor
+
+  // set up I2C backpack
+  lcd.init();
+
+  lcd.backlight(); // turns LCD backlight on
+
+  // initialize buttons as input digital pins
+  pinMode(redButtonPin, INPUT);
+  pinMode(yellowButtonPin, INPUT);
+  pinMode(blueButtonPin, INPUT);
+  
+  // intro screen
+  lcd.setCursor(0,0);
+  lcd.print("Good morning,");
+  lcd.setCursor(0,1);
+  lcd.print("Agent P.");
+  delay(3000); // delay 3 seconds
+  lcd.clear(); // clear LCD
+
+  // user needs to press blue button to start
+  lcd.setCursor(0,0);
+  lcd.print("press the");
+  lcd.setCursor(0,1);
+  lcd.print("blue button");
+  lcd.blink();
+}
+
+void loop() {
+
+  // read button states
+  redButtonReading = digitalRead(redButtonPin);
+  yellowButtonReading = digitalRead(yellowButtonPin);
+  blueButtonReading = digitalRead(blueButtonPin);
+
+  // variables to calculate average absorbance
+  float trialSum = 0.0; // sum of all absorbance readings in samples array
+  float trialMean = 0.0; // average of all absorbance readings in samples array
+
+  // variables for confidence interval
+  float concentration = 0.0; // concentration reading from the calibration regression line
+  float sca = 0.0; // confidence interval for concentration
+
+  // conditional that executes if blue button is pressed (starts program)
+  if (blueButtonReading == HIGH) {
+    redState = 0; // clears red flag; blue was pressed after red, so sequence is valid
+    blueState = 1; // flags blue button as being pressed and measurement has not been taken
+
+    // if blue button is pressed right after yellow button (measurement already taken , so user has to reset before pressing blue again)
+    if (yellowState == 1) { 
+      lcd.clear();
+        lcd.setCursor(0,0);
+        lcd.print("Press the ");
+        lcd.setCursor(0,1);
+        lcd.print("red button first");
+    }
+
+    // message if blue button is pressed and other states are 0
+    else {
+      // instructs user to insert cuvette sample and press yellow button when finished
+      lcd.clear(); // clear LCD display
+      lcd.setCursor(0,0);
+      lcd.print("Insert 4mL");
+      lcd.setCursor(0,1);
+      lcd.print("cuvette sample:");
+      delay(3000); // wait 3 seconds
+
+      // instructs the user to cover the cuvette with the hat (to minimize external light)
+      lcd.clear();
+      lcd.setCursor(0,0);
+      lcd.print("Cover cuvette");
+      lcd.setCursor(0,1);
+      lcd.print("with hat");
+      delay(3000); // wait 3 seconds
+
+      lcd.clear();
+      lcd.setCursor(0,0);
+      lcd.print("Press the yellow button");
+      lcd.setCursor(0,1);
+      lcd.print("when complete");
+    }
+  }
+
+  // conditional that executes if yellow button pressed (collects readings and calculates confidence interval)
+  if (yellowButtonReading == HIGH) {
+      blueState = 0; // clears blue flag; measurements have been taken so user will not be warned about no readings taken when pressing the red button
+      
+      if (yellowState == 0) {
+        yellowState = 1;
+      } else {
+        yellowState = 0;
+      }
+
+      // conditional that checks if user attempts to press yellow after red before pressing blue button first
+      if (redState == 1) {
+        lcd.clear();
+        lcd.setCursor(0,0);
+        lcd.print("Push blue first");
+      }
+      else { // user follows directions
+        lcd.clear();
+      
+      // collecting numPoints samples of output voltages
+      for (int i = 0; i < numPoints; i++) {
+        // calculating output voltage at voltage divider
+        vOut = ((analogRead(photoRead)) * (vIn)) / 1023.0;
+        Serial.println(analogRead(photoRead)); // for debugging purposes
+      // voltage divider formula to calculate resistance of photoresistor 
+        photoResistance = (r1) * (vOut/(vIn - vOut));
+        Serial.println(photoResistance); // for debugging purposes
+
+        absorb = log10(rBlank / photoResistance); // calculating absorbance value
+        samples[i] = absorb; // stores absorbance reading into samples array
+      }
+
+      // calculating average absorbance reading (Ssamp)
+      // summing absorbance values in samples array
+      for (int j = 0; j < numPoints; j++) {
+        trialSum += samples[j];
+      }
+      trialMean = trialSum / numPoints;
+      
+      // calculating average concentration value using regression line
+      concentration = (trialMean - intercept) / slope;
+
+      // information generated from Excel linear regression analysis
+      float errorSlope = stdError/slope; // sr/b1
+      float sampleFracNumerator = (pow((trialMean - sampleStd),2)); // (Ssamp - Sstd)^2
+      float sampleFracDenominator = pow(slope, 2) * pow(concStd, 2) * (n-1); // b1^2 * sCstd^2 * (n-1)
+      float sampleFrac = sampleFracNumerator / sampleFracDenominator;
+      float totalSqrt = sqrt((1.0/m) + (1.0/n) + sampleFrac);
+      sca = errorSlope * totalSqrt;
+      float ciError = t * sca;
+
+      // calculating upper and lower bounds of confidence interval (ciErorr is negative)
+      float upBound = concentration - ciError; // upper bound
+      float lowBound = concentration + ciError; // lower bound
+
+      Serial.print("Absorbance:"); // for debugging purposes
+      Serial.print(trialMean, 4);
+
+      // printing average concentration
+      lcd.clear();
+      lcd.setCursor(0,0);
+      lcd.print("Concentration: ");
+      lcd.setCursor(0,1);
+      lcd.print(concentration, 4);
+      lcd.print("%");
+
+      delay(3000); // delay 3 seconds
+
+      // printing confidence interval on the LCD 
+      lcd.clear();
+      lcd.setCursor(0,0);
+      lcd.print("95 % interval");
+      lcd.setCursor(0,1);
+      lcd.print("[");
+      lcd.print(lowBound, 4);
+      lcd.print(",");
+      lcd.print(upBound, 4);
+      lcd.print("]");
+      lcd.print("%");
+
+      delay(3000); // delay 3 seconds
+
+      // printing disease state
+      int reply; // intializes reply state 
+      if (upBound < 1.0) {
+        reply = 0; // print not diseased (upper bound biomarker concentration is less than 1%)
+      } else if (upBound > 1.0 && lowBound < 1.0) {
+        reply = 1; // print inconclusive test (the confidence interval contains concentrations greater than and less than 1)
+      } else {
+        reply = 2; // print diseased (confidence interval contains concentrations strictly greater than 1%)
+      }
+
+      lcd.clear();
+      lcd.setCursor(0,0);
+
+      // prints message to LCD depending on disease classification stored in reply variable
+      switch(reply) {
+        // negative disease state
+        case 0:
+        lcd.print("Disease state:");
+        lcd.setCursor(0,1);
+        lcd.print("negative");
+        break;
+
+        // inconclusive disease state
+        case 1:
+        lcd.print("Disease state:");
+        lcd.setCursor(0,1);
+        lcd.print("inconclusive");
+        break;
+
+        // positive disease state
+        case 2:
+        lcd.print("Disease state:");
+        lcd.setCursor(0,1);
+        lcd.print("positive");
+        break;
+
+      }
+
+      delay(3000); // delay 3 seconds
+
+      // post measuring guide
+      lcd.clear();
+      lcd.setCursor(0,0);
+      lcd.print("Press red");
+      lcd.setCursor(0,1);
+      lcd.print("to reset");
+
+      }
+  }
+  
+  // executes if red button is pressed (resets program)
+  if (redButtonReading == HIGH) {
+    redState = 1; // mark red button being pressed, blocks yellow from being pressed before blue
+
+    // executes if no readings have been taken (user pressed blue button but not yellow)
+    if (blueState == 1) {
+      lcd.clear();
+      lcd.setCursor(0,0);
+      lcd.print("No readings");
+      lcd.setCursor(0,1);
+      lcd.print("press yellow");
+    } else 
+    { // yellow button pressed, so pressing red resets device
+      yellowState = 0; // clears yellow flag
+      lcd.clear();
+      lcd.setCursor(0,0);
+      lcd.print("Resetting...");
+      delay(2000);
+      lcd.clear();
+      lcd.setCursor(0,0);
+      lcd.print("To read again");
+      lcd.setCursor(0,1);
+      lcd.print("push blue button");
+    }
+
+  
+  }
+}
